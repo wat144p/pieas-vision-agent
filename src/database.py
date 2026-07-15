@@ -24,6 +24,8 @@ def init_db() -> None:
             hash TEXT UNIQUE NOT NULL,
             source_url TEXT NOT NULL,
             filepath TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
             scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             analyzed INTEGER DEFAULT 0
         );
@@ -50,17 +52,18 @@ def image_exists(hash_hex: str) -> bool:
     return exists
 
 
-def insert_image_record(hash_hex: str, source_url: str, filepath: str) -> None:
-    """Insert a new image record (ignore if hash already exists)."""
+def insert_image_record(hash_hex: str, source_url: str, filepath: str,
+                        latitude: float = None, longitude: float = None) -> None:
+    """Insert a new image record with optional geolocation."""
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO images (hash, source_url, filepath) VALUES (?, ?, ?)",
-            (hash_hex, source_url, filepath),
+            "INSERT INTO images (hash, source_url, filepath, latitude, longitude) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (hash_hex, source_url, filepath, latitude, longitude),
         )
         conn.commit()
     except sqlite3.IntegrityError:
-        # Duplicate hash – should not happen if we check first, but safe
         pass
     finally:
         conn.close()
@@ -78,11 +81,20 @@ def store_description(image_hash: str, description_json: str) -> None:
     """Insert or replace a description record."""
     conn = get_connection()
     conn.execute(
-        """
-        INSERT OR REPLACE INTO descriptions (image_hash, description_json)
-        VALUES (?, ?)
-        """,
+        "INSERT OR REPLACE INTO descriptions (image_hash, description_json) "
+        "VALUES (?, ?)",
         (image_hash, description_json),
     )
     conn.commit()
     conn.close()
+
+
+def get_unanalyzed_images() -> list:
+    """Return list of (hash, filepath) for images not yet analyzed."""
+    conn = get_connection()
+    cur = conn.execute(
+        "SELECT hash, filepath FROM images WHERE analyzed = 0"
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [(row["hash"], row["filepath"]) for row in rows]
