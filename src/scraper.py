@@ -180,3 +180,4 @@ if __name__ == "__main__":
     logger.info("Starting manual scrape...")
     added = scrape_all_sources()
     logger.info(f"Total new images this run: {len(added)}")
+    
