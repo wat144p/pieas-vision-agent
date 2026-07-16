@@ -11,8 +11,10 @@ import schedule
 import time
 import logging
 from pathlib import Path
+import json
 
 from src.scraper import scrape_all_sources
+from src.vision import analyze_image
 from src import database
 
 # ---------- CONFIGURATION ----------
@@ -49,13 +51,24 @@ def pipeline():
         logger.error(f"Scraping failed: {e}")
         new_images = []
 
-    # ----- Step 2: Analyze with VLM (placeholder for Week 3) -----
-    logger.info("Step 2/3: VLM analysis — NOT YET IMPLEMENTED")
-    # TODO Week 3: Import vision.py and process new_images
-    # for img_hash, filepath in new_images:
-    #     description = analyze_image(filepath)
-    #     database.store_description(img_hash, json.dumps(description))
-    #     database.mark_analyzed(img_hash)
+    # ----- Step 2: Analyze with VLM -----
+    logger.info("Step 2/3: VLM analysis...")
+    try:
+        unanalyzed = database.get_unanalyzed_images()
+        logger.info(f"Found {len(unanalyzed)} unanalyzed images")
+        for img_hash, filepath in unanalyzed:
+            try:
+                description = analyze_image(filepath)
+                if description:
+                    database.store_description(img_hash, json.dumps(description))
+                    database.mark_analyzed(img_hash)
+                    logger.info(f"  {img_hash[:12]}... analyzed and stored.")
+                else:
+                    logger.warning(f"  {img_hash[:12]}... analysis returned None, skipping.")
+            except Exception as e:
+                logger.error(f"  Failed to analyze {img_hash[:12]}: {e}")
+    except Exception as e:
+        logger.error(f"VLM analysis step failed: {e}")
 
     # ----- Step 3: Index into ChromaDB (placeholder for Week 5) -----
     logger.info("Step 3/3: ChromaDB indexing — NOT YET IMPLEMENTED")
