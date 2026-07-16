@@ -376,17 +376,18 @@ def scrape_all_sources() -> list[tuple[str, str]]:
         all_new.extend(new)
         time.sleep(REQUEST_DELAY)
 
-    # Facebook (if token available, single pass for API)
-    setup_social_sources()
-    for source_type, source_url in SOCIAL_SOURCES:
-        new = process_source(source_url, passes=1)
-        all_new.extend(new)
-        time.sleep(REQUEST_DELAY)
+    # Facebook: SKIPPED (requires token, 2FA blocked)
+    # setup_social_sources()
+    # for source_type, source_url in SOCIAL_SOURCES:
+    #     new = process_source(source_url, passes=1)
+    #     all_new.extend(new)
+    #     time.sleep(REQUEST_DELAY)
 
-    # Instagram (no token needed)
-    insta_new = scrape_instagram()
-    all_new.extend(insta_new)
+    # Instagram: SKIPPED (authentication not yet resolved)
+    # insta_new = scrape_instagram()
+    # all_new.extend(insta_new)
 
+    logger.info("Social media sources skipped for now (Instagram/Facebook).")
     return all_new
 
 
