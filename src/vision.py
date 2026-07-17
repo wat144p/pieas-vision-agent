@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 VISION_MODEL = "llava:34b"
-OLLAMA_TIMEOUT = 120
+OLLAMA_TIMEOUT = 120          # (unused – kept for reference)
 MAX_RETRIES = 2
 
 # --- Prompt template ---
@@ -92,7 +92,9 @@ def analyze_image(image_path: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Image file not found: {image_file}")
         return None
 
-    # Pre‑resize for speed (optional but recommended)
+    # Resize for speed (optional but recommended)
+    resized_path = None
+    send_path = image_file
     try:
         from PIL import Image
         img = Image.open(image_file)
@@ -106,70 +108,76 @@ def analyze_image(image_path: str) -> Optional[Dict[str, Any]]:
             img.save(resized_path, "JPEG", quality=85)
             send_path = resized_path
             logger.info(f"Resized {image_file.name} from {w}x{h} to {new_size[0]}x{new_size[1]}")
-        else:
-            send_path = image_file
     except Exception as e:
         logger.warning(f"Could not resize image, sending original: {e}")
-        send_path = image_file
 
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            logger.info(f"Analyzing {image_file.name} (attempt {attempt+1})")
-            response = ollama.chat(
-                model=VISION_MODEL,
-                messages=[{
-                    "role": "user",
-                    "content": ANALYSIS_PROMPT,
-                    "images": [str(send_path)]
-                }],
-                options={"temperature": 0.1}
-            )
-            content = response.get("message", {}).get("content", "")
-            logger.debug(f"Raw VLM response: {content[:300]}...")
-
-            # Clean up markdown fences
-            clean = content.strip()
-            if clean.startswith("```"):
-                lines = clean.splitlines()
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                clean = "\n".join(lines).strip()
-
-            # First parse attempt
+    try:
+        for attempt in range(MAX_RETRIES + 1):
             try:
-                result = json.loads(clean)
-            except json.JSONDecodeError:
-                logger.warning("Initial JSON parse failed, attempting repair...")
-                repaired = repair_json(clean)
+                logger.info(f"Analyzing {image_file.name} (attempt {attempt+1})")
+                response = ollama.chat(
+                    model=VISION_MODEL,
+                    messages=[{
+                        "role": "user",
+                        "content": ANALYSIS_PROMPT,
+                        "images": [str(send_path)]
+                    }],
+                    options={"temperature": 0.1}
+                    # timeout removed – the library doesn't accept it directly.
+                )
+                content = response.get("message", {}).get("content", "")
+                logger.debug(f"Raw VLM response: {content[:300]}...")
+
+                # Clean up markdown fences
+                clean = content.strip()
+                if clean.startswith("```"):
+                    lines = clean.splitlines()
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].startswith("```"):
+                        lines = lines[:-1]
+                    clean = "\n".join(lines).strip()
+
+                # First parse attempt
                 try:
-                    result = json.loads(repaired)
-                    logger.info("JSON repair succeeded.")
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON repair also failed: {e}. Raw: {clean[:500]}")
-                    continue  # retry
+                    result = json.loads(clean)
+                except json.JSONDecodeError:
+                    logger.warning("Initial JSON parse failed, attempting repair...")
+                    repaired = repair_json(clean)
+                    try:
+                        result = json.loads(repaired)
+                        logger.info("JSON repair succeeded.")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON repair also failed: {e}. Raw: {clean[:500]}")
+                        continue  # retry
 
-            # Validate required fields
-            required = [
-                "scene_description", "objects", "buildings_or_locations",
-                "event_type", "people_count", "visible_text", "relevant_tags", "category"
-            ]
-            if all(k in result for k in required):
-                return result
-            else:
-                missing = [k for k in required if k not in result]
-                logger.warning(f"Missing fields: {missing}. Retrying.")
-                continue
+                # Validate required fields
+                required = [
+                    "scene_description", "objects", "buildings_or_locations",
+                    "event_type", "people_count", "visible_text", "relevant_tags", "category"
+                ]
+                if all(k in result for k in required):
+                    return result
+                else:
+                    missing = [k for k in required if k not in result]
+                    logger.warning(f"Missing fields: {missing}. Retrying.")
+                    continue
 
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON decode failed (attempt {attempt+1}): {e}")
-            if attempt < MAX_RETRIES:
-                continue
-            else:
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON decode failed (attempt {attempt+1}): {e}")
+                if attempt < MAX_RETRIES:
+                    continue
+                else:
+                    return None
+            except Exception as e:
+                logger.error(f"VLM analysis error: {e}")
                 return None
-        except Exception as e:
-            logger.error(f"VLM analysis error: {e}")
-            return None
-
-    return None
+        return None
+    finally:
+        # Clean up temporary resized file
+        if resized_path and resized_path.exists() and resized_path != image_file:
+            try:
+                resized_path.unlink()
+                logger.debug(f"Temporary resized image deleted: {resized_path}")
+            except Exception as e:
+                logger.warning(f"Could not delete temporary file {resized_path}: {e}")

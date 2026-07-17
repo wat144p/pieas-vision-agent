@@ -27,12 +27,17 @@ DEST_DIR.mkdir(parents=True, exist_ok=True)
 
 def download_file(filename, url):
     dest = DEST_DIR / filename
-    headers = {}
-    initial_pos = 0
+    # If the file already exists and has non-zero size, check if it's complete
     if dest.exists():
+        # We assume a previously interrupted download; we can resume.
+        # But if size is exactly the expected content-length, we could skip.
+        # For simplicity, we'll attempt to resume by default.
         initial_pos = dest.stat().st_size
-        headers["Range"] = f"bytes={initial_pos}-"
+        headers = {"Range": f"bytes={initial_pos}-"}
         print(f"Resuming {filename} from byte {initial_pos:,} ({initial_pos/(1024**3):.2f} GB)")
+    else:
+        initial_pos = 0
+        headers = {}
 
     session = requests.Session()
     adapter = requests.adapters.HTTPAdapter(max_retries=3)
@@ -48,6 +53,11 @@ def download_file(filename, url):
             verify=False,
             timeout=(10, 300),
         )
+        # If the server returns 416 (Requested Range Not Satisfiable), the file is likely complete.
+        if response.status_code == 416:
+            print(f"{filename} appears to be already fully downloaded (range not satisfiable).")
+            return
+
         response.raise_for_status()
 
         total_size = None
@@ -80,8 +90,8 @@ if __name__ == "__main__":
         download_file(fname, url)
     print("All files downloaded successfully.")
     print("Next steps:")
-    print("  1. Create Modelfile in C:\\ollama_models\\ with the two lines:")
+    print("  1. Create Modelfile in C:\\ollama_models\\ with the following content:")
     print("     FROM llava-v1.6-34b.Q4_K_M.gguf")
-    print("     PARAMETER mmproj mmproj-model-f16.gguf")
+    print("     ADAPTER mmproj-model-f16.gguf")   # <-- CORRECTED: ADAPTER, not PARAMETER
     print("  2. Run: ollama create llava:34b -f C:\\ollama_models\\Modelfile")
     print("  3. Verify: ollama list")
