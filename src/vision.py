@@ -15,8 +15,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 VISION_MODEL = "llava:34b"
-OLLAMA_TIMEOUT = 120          # (unused – kept for reference)
-MAX_RETRIES = 2
+MAX_RETRIES = 3
 
 # --- Prompt template ---
 ANALYSIS_PROMPT = """
@@ -24,13 +23,16 @@ You are an expert visual analyst for the Pakistan Institute of Engineering and A
 Analyze the given image carefully and output a **valid JSON object** with the following fields.
 Do NOT include any text outside the JSON object.
 
+CRITICAL: The "people_count" field MUST be a plain integer number (e.g., 0, 1, 5, 10). Do NOT use "10+", "about 10", "several", or any other text. Just a number.
+CRITICAL: The "visible_text" field should be a SINGLE string or null. If there are multiple text items, combine them with commas or semicolons into one string.
+
 Required fields:
 - scene_description: string, a concise 1‑2 sentence description of the scene.
 - objects: list of strings, objects visible in the image (people, equipment, furniture, etc.).
 - buildings_or_locations: string or null, name of the building or location if recognizable (e.g., "Main Auditorium", "Robotics Lab", "Cafeteria", "Library"). If the image is from PIEAS, try to identify the campus area.
 - event_type: string or null, the type of event if applicable (e.g., "Convocation", "Seminar", "Cultural Show", "Sports Day", "Lab Work", "Campus Life").
-- people_count: integer, approximate number of people visible (0 if none).
-- visible_text: string or null, any clearly readable text in the image (OCR).
+- people_count: integer, approximate number of people visible (0 if none). Output ONLY a number.
+- visible_text: string or null, any clearly readable text in the image (OCR). Combine multiple text items into one string.
 - relevant_tags: list of strings, 3‑7 keywords or tags that categorize the image content (e.g., "students", "laboratory", "robotics", "convocation", "campus building").
 - category: string, a single high‑level category from: ["Academics", "Research", "Events", "Campus Life", "Facilities", "Admissions", "Other"].
 
@@ -54,6 +56,9 @@ def repair_json(text: str) -> str:
     - Missing commas between key-value pairs
     - Trailing commas after last element
     - Extra text before/after JSON object
+    - Non-numeric values in numeric fields
+    - Multiple quoted strings in a single field (e.g., "visible_text": "a", "b", "c")
+    - Missing quotes around strings
     """
     # Extract the outermost { ... } block
     match = re.search(r'\{.*\}', text, re.DOTALL)
@@ -75,6 +80,66 @@ def repair_json(text: str) -> str:
 
     # Remove trailing commas before } or ]
     json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+
+    # FIX: Handle multiple quoted strings in visible_text field
+    # Pattern: "visible_text": "text1", "text2", "text3", ... -> "visible_text": "text1, text2, text3"
+    def fix_visible_text(match):
+        """Combine multiple quoted strings into one"""
+        prefix = match.group(1)  # "visible_text":
+        rest = match.group(2)    # The rest including all quoted strings
+        # Find all quoted strings
+        quoted_strings = re.findall(r'"([^"]*)"', rest)
+        if quoted_strings:
+            # Join them with commas
+            combined = ', '.join(quoted_strings)
+            return f'{prefix} "{combined}"'
+        return match.group(0)
+
+    # Find visible_text with multiple quoted strings
+    # Match pattern: "visible_text": "text1", "text2", "text3", ... (until comma or brace)
+    json_str = re.sub(
+        r'("visible_text"\s*:\s*)("(?:(?:[^"]*)"\s*,\s*")+[^"]*")',
+        fix_visible_text,
+        json_str
+    )
+
+    # Handle visible_text with multiple quoted strings where they're on separate lines
+    # First, collect all the text after "visible_text": until the next field
+    def fix_multiline_visible_text(match):
+        """Fix visible_text when it spans multiple quoted strings on separate lines"""
+        field_start = match.group(0)
+        # Find all quoted strings in this block
+        quoted = re.findall(r'"([^"]*)"', field_start)
+        if len(quoted) > 1:
+            # Keep the first one as the actual visible_text
+            first = quoted[0]
+            rest = quoted[1:]
+            # The rest are likely additional text items - we'll keep them as part of visible_text
+            # but remove the extra field entries
+            return f'"visible_text": "{first}"'
+        return field_start
+
+    # FIX: Handle people_count with any non-numeric value
+    def extract_number(value):
+        """Extract the first number from a string or return 0"""
+        num_match = re.search(r'\d+', str(value))
+        if num_match:
+            return num_match.group(0)
+        return 0
+
+    def fix_people_count(match):
+        """Replace people_count value with a plain number"""
+        value = match.group(1)
+        num = extract_number(value)
+        return f'"people_count": {num}'
+
+    # Handle quoted values: "people_count": "10+", "people_count": "10+ (as there are...", etc.
+    json_str = re.sub(r'"people_count"\s*:\s*"([^"]+)"', fix_people_count, json_str)
+    
+    # Handle unquoted values: "people_count": 10+, "people_count": about 10, etc.
+    json_str = re.sub(r'"people_count"\s*:\s*([^,}\n]+)', 
+                      lambda m: f'"people_count": {extract_number(m.group(1))}', 
+                      json_str)
 
     return json_str
 
@@ -123,7 +188,6 @@ def analyze_image(image_path: str) -> Optional[Dict[str, Any]]:
                         "images": [str(send_path)]
                     }],
                     options={"temperature": 0.1}
-                    # timeout removed – the library doesn't accept it directly.
                 )
                 content = response.get("message", {}).get("content", "")
                 logger.debug(f"Raw VLM response: {content[:300]}...")
@@ -141,27 +205,74 @@ def analyze_image(image_path: str) -> Optional[Dict[str, Any]]:
                 # First parse attempt
                 try:
                     result = json.loads(clean)
-                except json.JSONDecodeError:
-                    logger.warning("Initial JSON parse failed, attempting repair...")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Initial JSON parse failed: {e}, attempting repair...")
                     repaired = repair_json(clean)
+                    logger.debug(f"Repaired JSON: {repaired[:200]}...")
                     try:
                         result = json.loads(repaired)
                         logger.info("JSON repair succeeded.")
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON repair also failed: {e}. Raw: {clean[:500]}")
-                        continue  # retry
+                    except json.JSONDecodeError as e2:
+                        logger.error(f"JSON repair also failed: {e2}. Raw: {clean[:500]}")
+                        if attempt < MAX_RETRIES:
+                            continue
+                        else:
+                            return None
 
                 # Validate required fields
                 required = [
                     "scene_description", "objects", "buildings_or_locations",
                     "event_type", "people_count", "visible_text", "relevant_tags", "category"
                 ]
-                if all(k in result for k in required):
-                    return result
-                else:
-                    missing = [k for k in required if k not in result]
-                    logger.warning(f"Missing fields: {missing}. Retrying.")
-                    continue
+                
+                # Check which fields are missing
+                missing = [k for k in required if k not in result]
+                
+                # Try to fix common issues with visible_text
+                if "visible_text" in result and isinstance(result["visible_text"], list):
+                    # If visible_text is a list, join it into a string
+                    result["visible_text"] = ", ".join([str(item) for item in result["visible_text"]])
+                
+                if missing:
+                    logger.warning(f"Missing fields: {missing}. Attempting to fill defaults.")
+                    # Fill missing fields with defaults
+                    if "people_count" not in result:
+                        result["people_count"] = 0
+                    if "buildings_or_locations" not in result:
+                        result["buildings_or_locations"] = None
+                    if "event_type" not in result:
+                        result["event_type"] = None
+                    if "visible_text" not in result:
+                        result["visible_text"] = None
+                    if "objects" not in result:
+                        result["objects"] = []
+                    if "relevant_tags" not in result:
+                        result["relevant_tags"] = []
+                    if "scene_description" not in result:
+                        result["scene_description"] = "No description available"
+                    if "category" not in result:
+                        result["category"] = "Other"
+                    
+                    # Check again if we have all fields
+                    if all(k in result for k in required):
+                        logger.info("Filled missing fields with defaults, continuing...")
+                    else:
+                        logger.error("Still missing required fields after filling defaults")
+                        continue
+
+                # Ensure people_count is an integer
+                try:
+                    result["people_count"] = int(result["people_count"])
+                except (ValueError, TypeError):
+                    # Try to extract a number from the value
+                    num_match = re.search(r'\d+', str(result["people_count"]))
+                    result["people_count"] = int(num_match.group(0)) if num_match else 0
+                
+                # Ensure visible_text is a string or None
+                if result.get("visible_text") is not None and not isinstance(result["visible_text"], str):
+                    result["visible_text"] = str(result["visible_text"])
+                
+                return result
 
             except json.JSONDecodeError as e:
                 logger.warning(f"JSON decode failed (attempt {attempt+1}): {e}")
