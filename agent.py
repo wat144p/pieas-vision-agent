@@ -70,9 +70,40 @@ def pipeline():
     except Exception as e:
         logger.error(f"VLM analysis step failed: {e}")
 
-    # ----- Step 3: Index into ChromaDB (placeholder for Week 5) -----
-    logger.info("Step 3/3: ChromaDB indexing — NOT YET IMPLEMENTED")
-    # TODO Week 5: Import indexer.py and embed descriptions
+    # ----- Step 3: Index into ChromaDB -----
+    logger.info("Step 3/3: ChromaDB indexing...")
+    try:
+        from src.indexer import index_single, index_all_images
+
+        # If we have new images from this run, index only them
+        if new_images:
+            for img_hash, _ in new_images:
+                try:
+                    # Fetch the description we just stored
+                    conn = database.get_connection()
+                    row = conn.execute(
+                        "SELECT description_json FROM descriptions WHERE image_hash = ?",
+                        (img_hash,)
+                    ).fetchone()
+                    conn.close()
+                    if row:
+                        desc = json.loads(row["description_json"])
+                        index_single(img_hash, desc)
+                        logger.info(f"  {img_hash[:12]}... indexed.")
+                    else:
+                        logger.warning(f"  {img_hash[:12]}... no description found, skipped indexing.")
+                except Exception as e:
+                    logger.error(f"  Failed to index {img_hash[:12]}: {e}")
+        else:
+            # No new images – optionally you can still call index_all_images
+            # to catch any previously unindexed items (harmless if already done)
+            indexed = index_all_images()
+            if indexed:
+                logger.info(f"Indexed {indexed} previously unindexed images.")
+            else:
+                logger.info("All images already indexed.")
+    except Exception as e:
+        logger.error(f"ChromaDB indexing step failed: {e}")
 
     logger.info("=" * 50)
     logger.info("PIPELINE RUN COMPLETE")

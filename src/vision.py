@@ -57,7 +57,7 @@ def repair_json(text: str) -> str:
     - Trailing commas after last element
     - Extra text before/after JSON object
     - Non-numeric values in numeric fields
-    - Multiple quoted strings in a single field (e.g., "visible_text": "a", "b", "c")
+    - Multiple quoted strings in visible_text field
     - Missing quotes around strings
     """
     # Extract the outermost { ... } block
@@ -66,8 +66,7 @@ def repair_json(text: str) -> str:
         return text
     json_str = match.group(0)
 
-    # Fix missing commas between objects/arrays by looking for patterns
-    # "val"\n"key" -> "val",\n"key"
+    # Fix missing commas between objects/arrays
     json_str = re.sub(r'"\s*\n?\s*"', '",\n"', json_str)
     json_str = re.sub(r']\s*\n?\s*"', '],\n"', json_str)
     json_str = re.sub(r'}\s*\n?\s*"', '},\n"', json_str)
@@ -75,51 +74,39 @@ def repair_json(text: str) -> str:
     json_str = re.sub(r'}\s*\n?\s*\{', '},\n{', json_str)
     json_str = re.sub(r']\s*\n?\s*]', '],\n]', json_str)
     json_str = re.sub(r'}\s*\n?\s*}', '},\n}', json_str)
-    json_str = re.sub(r'([0-9])\s*\n?\s*"', r'\1,\n"', json_str)   # number followed by "
-    json_str = re.sub(r'(true|false|null)\s*\n?\s*"', r'\1,\n"', json_str)  # true/false/null followed by "
+    json_str = re.sub(r'([0-9])\s*\n?\s*"', r'\1,\n"', json_str)
+    json_str = re.sub(r'(true|false|null)\s*\n?\s*"', r'\1,\n"', json_str)
 
     # Remove trailing commas before } or ]
     json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
 
-    # FIX: Handle multiple quoted strings in visible_text field
-    # Pattern: "visible_text": "text1", "text2", "text3", ... -> "visible_text": "text1, text2, text3"
-    def fix_visible_text(match):
-        """Combine multiple quoted strings into one"""
-        prefix = match.group(1)  # "visible_text":
-        rest = match.group(2)    # The rest including all quoted strings
-        # Find all quoted strings
-        quoted_strings = re.findall(r'"([^"]*)"', rest)
-        if quoted_strings:
-            # Join them with commas
-            combined = ', '.join(quoted_strings)
-            return f'{prefix} "{combined}"'
-        return match.group(0)
-
-    # Find visible_text with multiple quoted strings
-    # Match pattern: "visible_text": "text1", "text2", "text3", ... (until comma or brace)
-    json_str = re.sub(
-        r'("visible_text"\s*:\s*)("(?:(?:[^"]*)"\s*,\s*")+[^"]*")',
-        fix_visible_text,
-        json_str
-    )
-
-    # Handle visible_text with multiple quoted strings where they're on separate lines
-    # First, collect all the text after "visible_text": until the next field
-    def fix_multiline_visible_text(match):
-        """Fix visible_text when it spans multiple quoted strings on separate lines"""
-        field_start = match.group(0)
-        # Find all quoted strings in this block
-        quoted = re.findall(r'"([^"]*)"', field_start)
+    # --- FIX: visible_text with multiple quoted strings ---
+    # Safely find the "visible_text" field value and combine multiple strings
+    # without crossing into the next JSON key.
+    def fix_visible_text(text: str) -> str:
+        key_pat = r'"visible_text"\s*:\s*'
+        m = re.search(key_pat, text)
+        if not m:
+            return text
+        start = m.end()  # right after the colon
+        # Find the beginning of the next JSON key: comma + optional whitespace + quoted string + colon
+        next_key = re.search(r'\s*,\s*"[^"]+"\s*:', text[start:])
+        if next_key:
+            end = start + next_key.start()
+        else:
+            # No next key – take until the end of the string (safe for last field)
+            end = len(text)
+        segment = text[start:end]
+        quoted = re.findall(r'"([^"]*)"', segment)
         if len(quoted) > 1:
-            # Keep the first one as the actual visible_text
-            first = quoted[0]
-            rest = quoted[1:]
-            # The rest are likely additional text items - we'll keep them as part of visible_text
-            # but remove the extra field entries
-            return f'"visible_text": "{first}"'
-        return field_start
+            combined = ', '.join(quoted)
+            # Replace the whole segment with the combined string
+            text = text[:start] + f' "{combined}"' + text[end:]
+        return text
 
-    # FIX: Handle people_count with any non-numeric value
+    json_str = fix_visible_text(json_str)
+
+    # --- FIX: people_count with non‑numeric values ---
     def extract_number(value):
         """Extract the first number from a string or return 0"""
         num_match = re.search(r'\d+', str(value))
@@ -128,17 +115,15 @@ def repair_json(text: str) -> str:
         return 0
 
     def fix_people_count(match):
-        """Replace people_count value with a plain number"""
         value = match.group(1)
         num = extract_number(value)
         return f'"people_count": {num}'
 
     # Handle quoted values: "people_count": "10+", "people_count": "10+ (as there are...", etc.
     json_str = re.sub(r'"people_count"\s*:\s*"([^"]+)"', fix_people_count, json_str)
-    
     # Handle unquoted values: "people_count": 10+, "people_count": about 10, etc.
-    json_str = re.sub(r'"people_count"\s*:\s*([^,}\n]+)', 
-                      lambda m: f'"people_count": {extract_number(m.group(1))}', 
+    json_str = re.sub(r'"people_count"\s*:\s*([^,}\n]+)',
+                      lambda m: f'"people_count": {extract_number(m.group(1))}',
                       json_str)
 
     return json_str
@@ -205,6 +190,7 @@ def analyze_image(image_path: str) -> Optional[Dict[str, Any]]:
                 # First parse attempt
                 try:
                     result = json.loads(clean)
+                    logger.info("JSON parsed successfully without repair.")  # emoji removed
                 except json.JSONDecodeError as e:
                     logger.warning(f"Initial JSON parse failed: {e}, attempting repair...")
                     repaired = repair_json(clean)
@@ -264,7 +250,6 @@ def analyze_image(image_path: str) -> Optional[Dict[str, Any]]:
                 try:
                     result["people_count"] = int(result["people_count"])
                 except (ValueError, TypeError):
-                    # Try to extract a number from the value
                     num_match = re.search(r'\d+', str(result["people_count"]))
                     result["people_count"] = int(num_match.group(0)) if num_match else 0
                 
@@ -272,6 +257,7 @@ def analyze_image(image_path: str) -> Optional[Dict[str, Any]]:
                 if result.get("visible_text") is not None and not isinstance(result["visible_text"], str):
                     result["visible_text"] = str(result["visible_text"])
                 
+                logger.info(f"Successfully analyzed {image_file.name}")  # emoji removed
                 return result
 
             except json.JSONDecodeError as e:
