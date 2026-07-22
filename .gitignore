@@ -6,3 +6,4 @@ data/descriptions/*
 logs/*
 *.db
 .DS_Store
+chroma_db/
