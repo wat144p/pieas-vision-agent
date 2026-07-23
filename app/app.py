@@ -118,7 +118,7 @@ query = st.text_input("Search query (e.g., 'students in lab', 'convocation cerem
 top_k = st.slider("Number of results", min_value=5, max_value=50, value=20)
 
 if st.button("Search") or query:
-    if not query:
+    if not query or not query.strip():
         st.warning("Please enter a search query.")
     else:
         with st.spinner("Searching..."):
@@ -128,12 +128,15 @@ if st.button("Search") or query:
         if not results:
             st.info("No results found. Try a different query.")
         else:
-            # Filter by selected tags (post-search, because ChromaDB doesn't easily filter by list tags)
+            # Filter by selected tags (case‑insensitive)
             if selected_tags:
                 filtered = []
                 for r in results:
                     desc_tags = r["description"].get("relevant_tags", [])
-                    if any(tag.lower() in [t.lower() for t in desc_tags] for tag in selected_tags):
+                    if any(
+                        tag.lower() in [t.lower() for t in desc_tags]
+                        for tag in selected_tags
+                    ):
                         filtered.append(r)
                 results = filtered
 
@@ -166,37 +169,85 @@ if st.button("Search") or query:
                     mime="text/csv",
                 )
 
-            # ---- Results grid ----
-            cols = st.columns(3)
-            for i, r in enumerate(results):
-                col = cols[i % 3]
-                desc = r["description"]
-                # Construct image path
-                img_path = PROJECT_ROOT / r["filepath"]
-                if img_path.exists():
-                    col.image(str(img_path), width='stretch')
-                else:
-                    col.warning(f"Image not found: {r['filepath']}")
+            # ---- Relevance helpers ----
+            def similarity_score(distance: float) -> float:
+                """Convert cosine distance to a percentage (0‑100)."""
+                # Cosine distance ranges from 0 (identical) to 2 (opposite)
+                return max(0.0, (1 - distance / 2) * 100)
 
-                # Snippet
-                snippet = desc.get("scene_description", "No description")[:120]
-                col.markdown(f"**{snippet}**")
+            RELEVANCE_THRESHOLD = 1.0   # distance <= 1.0 => high relevance
 
-                # Category & tags pills
-                cat = desc.get("category", "Other")
-                col.markdown(f"🏷️ {cat}")
-                tags = ", ".join(desc.get("relevant_tags", []))
-                if tags:
-                    col.markdown(f"🔖 {tags}")
+            high_rel = [r for r in results if r["distance"] <= RELEVANCE_THRESHOLD]
+            low_rel  = [r for r in results if r["distance"] > RELEVANCE_THRESHOLD]
 
-                # Expandable detail
-                with col.expander("Full metadata"):
-                    st.markdown(f"**Scene:** {desc.get('scene_description', 'N/A')}")
-                    st.markdown(f"**Category:** {desc.get('category', 'N/A')}")
-                    st.markdown(f"**Event:** {desc.get('event_type', 'N/A')}")
-                    st.markdown(f"**People:** {desc.get('people_count', 'N/A')}")
-                    st.markdown(f"**Text:** {desc.get('visible_text', 'N/A')}")
-                    st.markdown(f"**Buildings:** {desc.get('buildings_or_locations', 'N/A')}")
-                    st.markdown(f"**Tags:** {', '.join(desc.get('relevant_tags', []))}")
-                    st.markdown(f"**Distance:** {r['distance']:.4f}")
-                    st.markdown(f"**Source:** {r['source_url']}")
+            # ---- Display high‑relevance results ----
+            if high_rel:
+                st.subheader("Most relevant")
+                cols = st.columns(3)
+                for i, r in enumerate(high_rel):
+                    col = cols[i % 3]
+                    desc = r["description"]
+                    img_path = PROJECT_ROOT / r["filepath"]
+                    if img_path.exists():
+                        col.image(str(img_path), width="stretch")
+                    else:
+                        col.warning(f"Image not found: {r['filepath']}")
+
+                    snippet = desc.get("scene_description", "No description")[:120]
+                    col.markdown(f"**{snippet}**")
+
+                    # Relevance indicator
+                    sim = similarity_score(r["distance"])
+                    col.progress(int(sim), text=f"match: {sim:.0f}%")
+
+                    col.markdown(f"🏷️ {desc.get('category', 'Other')}")
+                    tags = ", ".join(desc.get("relevant_tags", []))
+                    if tags:
+                        col.markdown(f"🔖 {tags}")
+
+                    with col.expander("Full metadata"):
+                        st.markdown(f"**Scene:** {desc.get('scene_description', 'N/A')}")
+                        st.markdown(f"**Category:** {desc.get('category', 'N/A')}")
+                        st.markdown(f"**Event:** {desc.get('event_type', 'N/A')}")
+                        st.markdown(f"**People:** {desc.get('people_count', 'N/A')}")
+                        st.markdown(f"**Text:** {desc.get('visible_text', 'N/A')}")
+                        st.markdown(f"**Buildings:** {desc.get('buildings_or_locations', 'N/A')}")
+                        st.markdown(f"**Tags:** {', '.join(desc.get('relevant_tags', []))}")
+                        st.markdown(f"**Distance:** {r['distance']:.4f}")
+                        st.markdown(f"**Source:** {r['source_url']}")
+
+            # ---- Display lower‑relevance results with a divider ----
+            if low_rel:
+                st.markdown("---")
+                st.subheader("Other results")
+                cols = st.columns(3)
+                for i, r in enumerate(low_rel):
+                    col = cols[i % 3]
+                    desc = r["description"]
+                    img_path = PROJECT_ROOT / r["filepath"]
+                    if img_path.exists():
+                        col.image(str(img_path), width="stretch")
+                    else:
+                        col.warning(f"Image not found: {r['filepath']}")
+
+                    snippet = desc.get("scene_description", "No description")[:120]
+                    col.markdown(f"**{snippet}**")
+
+                    sim = similarity_score(r["distance"])
+                    col.progress(int(sim), text=f"match: {sim:.0f}%")
+
+                    col.markdown(f"🏷️ {desc.get('category', 'Other')}")
+                    tags = ", ".join(desc.get("relevant_tags", []))
+                    if tags:
+                        col.markdown(f"🔖 {tags}")
+
+                    with col.expander("Full metadata"):
+                        st.markdown(f"**Scene:** {desc.get('scene_description', 'N/A')}")
+                        st.markdown(f"**Category:** {desc.get('category', 'N/A')}")
+                        st.markdown(f"**Event:** {desc.get('event_type', 'N/A')}")
+                        st.markdown(f"**People:** {desc.get('people_count', 'N/A')}")
+                        st.markdown(f"**Text:** {desc.get('visible_text', 'N/A')}")
+                        st.markdown(f"**Buildings:** {desc.get('buildings_or_locations', 'N/A')}")
+                        st.markdown(f"**Tags:** {', '.join(desc.get('relevant_tags', []))}")
+                        st.markdown(f"**Distance:** {r['distance']:.4f}")
+                        st.markdown(f"**Source:** {r['source_url']}")
